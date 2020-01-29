@@ -1,7 +1,7 @@
 import argparse, asyncio, io, os, enum, struct, collections, hashlib, ipaddress, socket, random
 import pproxy
-from . import enums, message, crypto, ip
-from .__doc__ import *
+from pesp import enums, message, crypto, ip
+from pesp.__doc__ import *
 
 class State(enum.Enum):
     INITIAL = 0

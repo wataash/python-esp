@@ -1,4 +1,6 @@
 import hashlib, os, random, hmac
+import typing as t
+
 from Crypto.Cipher import AES
 from . import enums
 
@@ -17,17 +19,23 @@ class Prf:
         enums.PrfId.PRF_HMAC_SHA2_384: (hashlib.sha384, 48),
         enums.PrfId.PRF_HMAC_SHA2_512: (hashlib.sha512, 64),
     }
-    def __init__(self, transform):
-        self.hasher, self.key_size = self.DIGESTS[transform] if type(transform) is enums.PrfId else self.DIGESTS_1[transform]
-    def prf(self, key, data):
+    def __init__(self, transform: t.Union[enums.HashId_1, enums.PrfId]):
+        if type(transform) is enums.PrfId:
+            self.hasher, self.key_size = self.DIGESTS[transform]
+        elif type(transform) is enums.HashId_1:
+            self.hasher, self.key_size = self.DIGESTS_1[transform]
+        else:
+            raise Exception(f'type(transform): {type(transform)}')
+    def prf(self, key: bytes, data: bytes) -> bytes:
         return hmac.HMAC(key, data, digestmod=self.hasher).digest()
-    def prfplus(self, key, seed, count=True):
+    def prfplus(self, key: bytes, seed: bytes, count=True):
         temp = bytes()
         for i in range(1, 1024):
             temp = self.prf(key, temp + seed + (bytes([i]) if count else b''))
             yield from temp
 
 class Integrity:
+    # key_size, hash_size
     DIGESTS_1 = {
         enums.IntegId_1.AUTH_HMAC_MD5: (hashlib.md5, 16, 12),
         enums.IntegId_1.AUTH_HMAC_SHA1: (hashlib.sha1, 20, 12),
@@ -44,13 +52,18 @@ class Integrity:
         enums.IntegId.AUTH_HMAC_SHA2_384_192: (hashlib.sha384, 48, 24),
         enums.IntegId.AUTH_HMAC_SHA2_512_256: (hashlib.sha512, 64, 32),
     }
-    def __init__(self, transform):
-        self.hasher, self.key_size, self.hash_size = self.DIGESTS[transform] if type(transform) is enums.IntegId else self.DIGESTS_1[transform]
+    def __init__(self, transform: t.Union[enums.IntegId_1, enums.IntegId]):
+        if type(transform) is enums.IntegId_1:
+            self.hasher, self.key_size, self.hash_size = self.DIGESTS_1[transform]
+        elif type(transform) is enums.IntegId:
+            self.hasher, self.key_size, self.hash_size = self.DIGESTS[transform]
+        else:
+            raise Exception(f'type(transform): {type(transform)}')
     def compute(self, key, data):
         return hmac.HMAC(key, data, digestmod=self.hasher).digest()[:self.hash_size]
 
 class Cipher:
-    def __init__(self, transform, keylen):
+    def __init__(self, transform: t.Union[enums.EncrId, enums.EncrId_1], keylen: int):
         assert type(transform) is enums.EncrId and transform == enums.EncrId.ENCR_AES_CBC or \
                type(transform) is enums.EncrId_1 and transform == enums.EncrId_1.AES_CBC
         self.keylen = keylen
@@ -65,7 +78,8 @@ class Cipher:
     def decrypt(self, key, iv, data):
         return AES.new(key, AES.MODE_CBC, iv=iv).decrypt(data)
     def generate_iv(self):
-        return os.urandom(self.block_size)
+        # return os.urandom(self.block_size)
+        return b'\0' * self.block_size
 
 class Crypto:
     def __init__(self, cipher, sk_e, integrity=None, sk_a=None, prf=None, sk_p=None, *, iv=None):
@@ -108,7 +122,9 @@ class Crypto:
         # do not remove padding according to ios cisco ipsec bug
         return plain
     def decrypt(self, encrypted):
+        # Initialization Vector
         iv = encrypted[:self.cipher.block_size]
+        # Encrypted Data
         ciphertext = encrypted[self.cipher.block_size:len(encrypted)-self.integrity.hash_size]
         plain = self.cipher.decrypt(self.sk_e, bytes(iv), bytes(ciphertext))
         padlen = plain[-1]
@@ -127,6 +143,9 @@ class Crypto:
         encrypted[len(encrypted)-len(checksum):] = checksum
 
 
+# https://en.wikipedia.org/wiki/Diffie%E2%80%93Hellman_key_exchange
+# modp: (p: prime, g: primitive root modulo p , length)
+# elliptic curve: (prime, (?, ?), length)
 PRIMES = {
     enums.DhId.DH_1: (0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A63A3620FFFFFFFFFFFFFFFF, 2, 96),
     enums.DhId.DH_2: (0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE65381FFFFFFFFFFFFFFFF, 2, 128),
@@ -168,13 +187,50 @@ def ec_mul(P, l, i, p, a):
         i, P = i>>1, ec_add(P, P, l<<3, p, a)
     return r
 
-def DiffieHellman(group, peer):
+def DiffieHellman(group: int, peer: bytes):
+    # dh 2
+    # 2**a % p
     if group not in PRIMES:
         raise Exception(f'Unsupported DH Group DH_{group}')
     p, g, l = PRIMES[group]
     a = random.randrange(p>>8, p)
+
+    # import collections
+    # import matplotlib.pyplot as plt
+    # count = 0
+    # d = collections.defaultdict(int)
+    # for i in range(p>>8, p):
+    #     count += 1
+    #     A: int = pow(g, i, p)
+    #     length = A.bit_length()
+    #     d[length] += 1
+    #     if count == 10_000:
+    #         plt.bar(d.keys(), d.values())
+    #         plt.yscale('log')
+    #         plt.ylim(1, 10_000)
+    #         plt.show()
+
     if type(g) is tuple:
+        # elliptic curve
         return ec_mul(g[0], l, a, p, g[1]).to_bytes(l*2, 'big'), ec_mul(int.from_bytes(peer, 'big'), l, a, p, g[1]).to_bytes(l*2, 'big')[:l]
     else:
-        return pow(g, a, p).to_bytes(l, 'big'), pow(int.from_bytes(peer, 'big'), a, p).to_bytes(l, 'big')
+        # tmp: debugging
+        a = 1
+        # A = g**1 % p = 2
+        # s = B
+        # Payload: Key Exchange (34)
+        #   Key Exchange Data: 2
+
+        # A = 1
+        # swan:
+        # public DH value verification failed: y < 2 || y > p - 1
+        # applying DH public value failed
+
+        A = pow(g, a, p)
+
+        A_bytes = A.to_bytes(l, 'big')
+        B = int.from_bytes(peer, 'big')
+        s = pow(B, a, p)
+        s_bytes = s.to_bytes(l, 'big')
+        return A_bytes, s_bytes
 

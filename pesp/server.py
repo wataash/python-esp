@@ -1,7 +1,19 @@
 import argparse, asyncio, io, os, enum, struct, collections, hashlib, ipaddress, socket, random
+import logging
+import typing as t
+
 import pproxy
 from pesp import enums, message, crypto, ip
 from pesp.__doc__ import *
+
+if 'PYCHARM_HOSTED' in os.environ:
+    # must before import logzero
+    os.environ['LOGZERO_FORCE_COLOR'] = '1'
+
+import logzero  # pylint: disable=wrong-import-positionnnn
+
+logger: logging.Logger = logzero.logger  # pylint: disable=invalid-name
+
 
 class State(enum.Enum):
     INITIAL = 0
@@ -205,33 +217,59 @@ class IKEv1Session:
             raise Exception(f'unhandled request {request!r}')
 
 class IKEv2Session:
-    def __init__(self, args, sessions, peer_spi):
+    def __init__(self, args: argparse.Namespace, sessions: t.Dict, peer_spi: bytes):
         self.args = args
         self.sessions = sessions
-        self.my_spi = os.urandom(8)
+        # self.my_spi = os.urandom(8)
+        self.my_spi = bytes.fromhex('deadbeef 00000000')
         self.peer_spi = peer_spi
         self.peer_msgid = 0
         self.my_crypto = None
         self.peer_crypto = None
-        self.my_nonce = os.urandom(32)
+        # self.my_nonce = os.urandom(32)
+        self.my_nonce = bytes.fromhex('00010203040506070809a0a1a2a3a4a5a6a7a8a9b0b1b2b3b4b5b6b7b8b9c0c1')
         self.peer_nonce = None
         self.state = State.INITIAL
         self.request_data = None
         self.response_data = None
         self.child_sa = []
         self.sessions[self.my_spi] = self
-    def create_key(self, ike_proposal, shared_secret, old_sk_d=None):
+    def create_key(self, ike_proposal: message.Proposal, shared_secret: bytes, old_sk_d=None):
+        """
+        writes
+        self.sk_d
+        self.my_crypto (SK_er, SK_ar, SK_pr)
+        self.peer_crypto (SK_ei, SK_ai, SK_pi)
+        """
         prf = crypto.Prf(ike_proposal.get_transform(enums.Transform.PRF).id)
         integ = crypto.Integrity(ike_proposal.get_transform(enums.Transform.INTEG).id)
         cipher = crypto.Cipher(ike_proposal.get_transform(enums.Transform.ENCR).id,
                                ike_proposal.get_transform(enums.Transform.ENCR).keylen)
         if not old_sk_d:
+            # 2.14.  Generating Keying Material for the IKE SA
+            # SKEYSEED = prf(Ni | Nr, g^ir)
+            # = hmac-sha1(key = Ni|Nr, msg = dh shared secret)
+            # 3.3.2.  Transform Substructure
+            # PRF_HMAC_SHA1
             skeyseed = prf.prf(self.peer_nonce+self.my_nonce, shared_secret)
         else:
             skeyseed = prf.prf(old_sk_d, shared_secret+self.peer_nonce+self.my_nonce)
         keymat_fmt = struct.Struct('>{0}s{1}s{1}s{2}s{2}s{0}s{0}s'.format(prf.key_size, integ.key_size, cipher.key_size))
+        # 2.14.  Generating Keying Material for the IKE SA
+        #    {SK_d | SK_ai | SK_ar | SK_ei | SK_er | SK_pi | SK_pr}
+        #                    = prf+ (SKEYSEED, Ni | Nr | SPIi | SPIr)
+        # bytes: 20  20      20      32      32      20      20
         keymat = prf.prfplus(skeyseed, self.peer_nonce+self.my_nonce+self.peer_spi+self.my_spi)
-        self.sk_d, sk_ai, sk_ar, sk_ei, sk_er, sk_pi, sk_pr = keymat_fmt.unpack(bytes(next(keymat) for _ in range(keymat_fmt.size)))
+        tmp = bytes(next(keymat) for _ in range(keymat_fmt.size))
+        self.sk_d, sk_ai, sk_ar, sk_ei, sk_er, sk_pi, sk_pr = keymat_fmt.unpack(tmp)
+        # print()
+        print("echo '"
+              f'{self.peer_spi.hex()},{self.my_spi.hex()},'
+              f"{sk_ei.hex()},{sk_er.hex()},"
+              f'"AES-CBC-256 [RFC3602]",'
+              f'{sk_ai.hex()},{sk_ar.hex()},'
+              f'"HMAC_SHA1_96 [RFC2404]"'
+              "' >> ~/.config/wireshark/ikev2_decryption_table")
         self.my_crypto = crypto.Crypto(cipher, sk_er, integ, sk_ar, prf, sk_pr)
         self.peer_crypto = crypto.Crypto(cipher, sk_ei, integ, sk_ai, prf, sk_pi)
     def create_child_key(self, child_proposal, nonce_i, nonce_r):
@@ -264,18 +302,42 @@ class IKEv2Session:
         elif request.message_id != self.peer_msgid:
             return
         request.parse_payloads(stream, crypto=self.peer_crypto)
-        print(repr(request))
+        logger.info(repr(request))
         if request.exchange == enums.Exchange.IKE_SA_INIT:
             assert self.state == State.INITIAL
             self.peer_nonce = request.get_payload(enums.Payload.NONCE).nonce
+            # aes cbc not included -> None?
             chosen_proposal = request.get_payload(enums.Payload.SA).get_proposal(enums.EncrId.ENCR_AES_CBC)
             payload_ke = request.get_payload(enums.Payload.KE)
-            prefered_dh = chosen_proposal.get_transform(enums.Transform.DH).id
+            prefered_dh: enums.DhId = chosen_proposal.get_transform(enums.Transform.DH).id
             if payload_ke.dh_group != prefered_dh or payload_ke.ke_data[0] == 0:
                 reply(self.response(enums.Exchange.IKE_SA_INIT, [ message.PayloadNOTIFY(0, enums.Notify.INVALID_KE_PAYLOAD, b'', prefered_dh.to_bytes(2, 'big'))]))
                 return
+            # A, s
             public_key, shared_secret = crypto.DiffieHellman(payload_ke.dh_group, payload_ke.ke_data)
             self.create_key(chosen_proposal, shared_secret)
+            # 2.23.  NAT Traversal
+            # TODO:
+            #    o  The data associated with the NAT_DETECTION_SOURCE_IP notification
+            #       is a SHA-1 digest of the SPIs (in the order they appear in the
+            #       header), IP address, and port from which this packet was sent.
+            #
+            #       There MAY be multiple NAT_DETECTION_SOURCE_IP payloads in a
+            #       message if the sender does not know which of several network
+            #       attachments will be used to send the packet.
+            #
+            #    o  The data associated with the NAT_DETECTION_DESTINATION_IP
+            #       notification is a SHA-1 digest of the SPIs (in the order they
+            #       appear in the header), IP address, and port to which this packet
+            #       was sent.
+            # but dunno peer IP... chances are remote_id
+            # NAT_DETECTION_SOURCE_IP data:
+            if False:
+                import hashlib
+                tmp_ip_peer = (13).to_bytes(1, 'big') + (73).to_bytes(1, 'big') + (19).to_bytes(1, 'big') + (1).to_bytes(1, 'big')
+                tmp_port_peer = (500).to_bytes(2, 'big')
+                hashlib.sha1(self.peer_spi + b'\0'*8 + tmp_ip_peer + tmp_port_peer).hexdigest()
+            # 3.10.  Notify Payload
             response_payloads = [ message.PayloadSA([chosen_proposal]),
                                   message.PayloadNONCE(self.my_nonce),
                                   message.PayloadKE(payload_ke.dh_group, public_key),
@@ -283,7 +345,9 @@ class IKEv2Session:
                                   message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_SOURCE_IP, b'', os.urandom(20)) ]
             reply(self.response(enums.Exchange.IKE_SA_INIT, response_payloads))
             self.state = State.SA_SENT
+            # sent dgram
             self.request_data = stream.getvalue()
+            breakp = 1
         elif request.exchange == enums.Exchange.IKE_AUTH:
             assert self.state == State.SA_SENT
             request_payload_idi = request.get_payload(enums.Payload.IDi)
@@ -375,9 +439,9 @@ class IKEv2Session:
 IKE_HEADER = b'\x00\x00\x00\x00'
 
 class IKE_500(asyncio.DatagramProtocol):
-    def __init__(self, args, sessions):
+    def __init__(self, args: argparse.Namespace, sessions: t.Dict):
         self.args = args
-        self.sessions = sessions
+        self.sessions: t.Dict[message.Spi, IKEv2Session] = sessions
     def connection_made(self, transport):
         self.transport = transport
     def datagram_received(self, data, addr, *, response_header=b''):
@@ -386,12 +450,16 @@ class IKE_500(asyncio.DatagramProtocol):
         if request.exchange == enums.Exchange.IKE_SA_INIT:
             session = IKEv2Session(self.args, self.sessions, request.spi_i)
         elif request.exchange == enums.Exchange.IDENTITY_1 and request.spi_r == bytes(8):
+            logger.error('TODO')
             session = IKEv1Session(self.args, self.sessions, request.spi_i)
         elif request.spi_r in self.sessions:
+            # IKE_AUTH
             session = self.sessions[request.spi_r]
         else:
+            logger.error('invalid?')
             return
         session.process(request, stream, addr[:2], lambda response: self.transport.sendto(response_header+response, addr))
+        breakp = 1
 
 class SPE_4500(IKE_500):
     def __init__(self, args, sessions):
@@ -400,8 +468,11 @@ class SPE_4500(IKE_500):
     def datagram_received(self, data, addr):
         spi = data[:4]
         if spi == b'\xff':
+            # https://tools.ietf.org/html/rfc3948
+            # 0xFF
             self.transport.sendto(b'\xff', addr)
         elif spi == IKE_HEADER:
+            # Non-ESP Marker
             IKE_500.datagram_received(self, data[4:], addr, response_header=IKE_HEADER)
         elif spi in self.sessions:
             sa = self.sessions[spi]

@@ -1,5 +1,10 @@
 import struct, io, collections, os, random, ipaddress
+import typing as t
+from . import crypto
 from . import enums
+
+Spi = t.NewType('Spi', bytes)  # 4 bytes
+
 
 class Payload:
     def __init__(self, type, critical=False):
@@ -8,6 +13,7 @@ class Payload:
         self.data = None
     @classmethod
     def parse(cls, type, critical, stream, length):
+        # polymorphing class method
         self = cls.__new__(cls)
         Payload.__init__(self, type, critical)
         self.parse_data(stream, length)
@@ -21,12 +27,14 @@ class Payload:
     def __repr__(self):
         return f'{self.type.name}({"critical, " if self.critical else ""}{self.to_repr()})'
 
-def attr_parse(stream, length, attr_type_cls):
+def attr_parse(stream, length, attr_type_cls) -> t.OrderedDict[t.Union[enums.CPAttrType, enums.ESPAttr, enums.TransformAttr], int]:
     values = collections.OrderedDict()
     while length > 0:
         attr_type, value = struct.unpack('>HH', stream.read(4))
         length -= 4
         if attr_type & 0x8000:
+            # Format: Type/Value (TV)
+            # Drop this bit
             attr_type &= 0x7FFF
         else:
             length -= value
@@ -239,7 +247,9 @@ class PayloadNATD_1(Payload):
         return f'{self.data.hex()}'
 
 
-Transform = collections.namedtuple('Transform', 'type id keylen')
+Transform = t.NamedTuple('Transform', [('type', enums.Transform), ('id', enums.EncrId), ('keylen', int)])
+# Transform: t.NamedTuple['Transform', [('type', str), ('id', int), ('keylen', int)]]
+# Transform = collections.namedtuple('Transform', 'type id keylen')
 
 class Proposal:
     def __init__(self, num, protocol, spi, transforms):
@@ -250,8 +260,8 @@ class Proposal:
     @classmethod
     def parse(cls, stream):
         num, protocol, spi_size, n_transforms = struct.unpack('>BBBB', stream.read(4))
-        spi = stream.read(spi_size)
-        transforms = []
+        spi: Spi = stream.read(spi_size)
+        transforms: t.List[Transform] = []
         more = True
         while more:
             more, length, type, id = struct.unpack('>BxHBxH', stream.read(8))
@@ -287,7 +297,7 @@ class PayloadSA(Payload):
     def __init__(self, proposals, critical=False):
         Payload.__init__(self, enums.Payload.SA, critical)
         self.proposals = proposals
-    def parse_data(self, stream, length):
+    def parse_data(self, stream: io.BytesIO, length: int):
         self.proposals = []
         more = True
         while more:
@@ -509,7 +519,7 @@ PayloadClass = {
 }
 
 class Message:
-    def __init__(self, spi_i, spi_r, version, exchange, flag, message_id, payloads=None, *, first_payload=None):
+    def __init__(self, spi_i: bytes, spi_r: bytes, version: int, exchange: int, flag: int, message_id: int, payloads: t.List[Payload] = None, *, first_payload: int = None):
         self.spi_i = spi_i
         self.spi_r = spi_r
         self.version = version
@@ -522,7 +532,7 @@ class Message:
     def parse(cls, stream):
         header = struct.unpack('>8s8s4B2L', stream.read(28))
         return Message(header[0], header[1], header[3], header[4], header[5], header[6], first_payload=header[2])
-    def parse_payloads(self, stream, *, crypto=None):
+    def parse_payloads(self, stream: io.BytesIO, *, crypto: crypto.Crypto = None):
         if self.flag & enums.MsgFlag.Encryption:
             stream = io.BytesIO(crypto.decrypt_1(stream.read(), self.message_id))
         next_payload = self.first_payload
@@ -530,7 +540,8 @@ class Message:
             payload_id = next_payload
             next_payload, critical, length = struct.unpack('>BBH', stream.read(4))
             critical = bool(critical >> 7)
-            payload = PayloadClass.get(payload_id, Payload).parse(payload_id, critical, stream, length-4)
+            tmp: t.Type[Payload] = PayloadClass.get(payload_id, Payload)
+            payload = tmp.parse(payload_id, critical, stream, length-4)
             if payload_id == enums.Payload.SK:
                 if crypto is not None:
                     crypto.verify_checksum(stream.getvalue())

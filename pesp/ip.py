@@ -442,6 +442,7 @@ class IPPacket:
                 tid, seq = struct.unpack('>HH', ip_body[4:8])
                 print(f'ECHO {remote_id[0]} -> {dst_name} Id={tid} Seq={seq} Data={icmp_body}')
                 # NEED ROOT PRIVILEGE TO SEND ICMP PACKET
+                # import socket
                 # a = socket.socket(socket.AF_INET, socket.SOCK_RAW, proto)
                 # a.sendto(icmp_body, (dst_name, 1))
                 # a.close()

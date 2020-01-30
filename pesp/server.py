@@ -362,7 +362,9 @@ class IKEv2Session:
             chosen_child_proposal = request.get_payload(enums.Payload.SA).get_proposal(enums.EncrId.ENCR_AES_CBC)
             child_sa = self.create_child_key(chosen_child_proposal, self.peer_nonce, self.my_nonce)
             chosen_child_proposal.spi = child_sa.spi_in
-            response_payload_idr = message.PayloadIDr(enums.IDType.ID_FQDN, f'{__title__}-{__version__}'.encode())
+            # response_payload_idr = message.PayloadIDr(enums.IDType.ID_FQDN, f'{__title__}-{__version__}'.encode())
+            # tmp
+            response_payload_idr = message.PayloadIDr(enums.IDType.ID_IPV4_ADDR, ipaddress.ip_address('10.0.2.15').packed)
             auth_data = self.auth_data(self.response_data, self.peer_nonce, response_payload_idr, self.my_crypto.sk_p)
 
             response_payloads = [ message.PayloadSA([chosen_child_proposal]),

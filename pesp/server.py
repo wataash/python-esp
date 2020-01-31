@@ -221,13 +221,13 @@ class IKEv2Session:
         self.args = args
         self.sessions = sessions
         # self.my_spi = os.urandom(8)
-        self.my_spi = bytes.fromhex('deadbeef 00000000')
+        self.my_spi = b'spi___py'
         self.peer_spi = peer_spi
         self.peer_msgid = 0
         self.my_crypto = None
         self.peer_crypto = None
         # self.my_nonce = os.urandom(32)
-        self.my_nonce = bytes.fromhex('00010203040506070809a0a1a2a3a4a5a6a7a8a9b0b1b2b3b4b5b6b7b8b9c0c1')
+        self.my_nonce = b'nonce_________________________py'
         self.peer_nonce = None
         self.state = State.INITIAL
         self.request_data = None
@@ -332,17 +332,38 @@ class IKEv2Session:
             #       was sent.
             # but dunno peer IP... chances are remote_id
             # NAT_DETECTION_SOURCE_IP data:
-            if False:
+            if True:
                 import hashlib
-                tmp_ip_peer = (13).to_bytes(1, 'big') + (73).to_bytes(1, 'big') + (19).to_bytes(1, 'big') + (1).to_bytes(1, 'big')
-                tmp_port_peer = (500).to_bytes(2, 'big')
-                hashlib.sha1(self.peer_spi + b'\0'*8 + tmp_ip_peer + tmp_port_peer).hexdigest()
+
+                # from peer:
+                # NAT_DETECTION_SOURCE_IP  19 1a ... 57
+                tmp_ip_peer = ipaddress.ip_address('10.0.2.15').packed
+                # tmp_ip_peer = int.from_bytes(tmp_ip_peer, 'little').to_bytes(4, 'big')
+                tmp_port_peer = (500).to_bytes(2, 'big')  # big!
+                sha1_peer_src = hashlib.sha1(self.peer_spi + b'\0'*8 + tmp_ip_peer + tmp_port_peer).digest()
+
+                # NAT_DETECTION_DESTINATION_IP  e1 68 ... a3
+                tmp_ip_local = ipaddress.ip_address('172.16.50.5').packed
+                tmp_port_local = (10502).to_bytes(2, 'big')  # big!
+                sha1_peer_dst = hashlib.sha1(self.peer_spi + b'\0'*8 + tmp_ip_local + tmp_port_local).digest()
+
+                # from local:
+                # NAT_DETECTION_SOURCE_IP  6f 44 ... 1b
+                sha1_src = hashlib.sha1(self.peer_spi + self.my_spi + tmp_ip_local + tmp_port_local).digest()
+                # NAT_DETECTION_DESTINATION_IP  1a 9b ... aa
+                sha1_dest = hashlib.sha1(self.peer_spi + self.my_spi + tmp_ip_peer + tmp_port_peer).digest()
+
             # 3.10.  Notify Payload
+            # response_payloads = [ message.PayloadSA([chosen_proposal]),
+            #                       message.PayloadNONCE(self.my_nonce),
+            #                       message.PayloadKE(payload_ke.dh_group, public_key),
+            #                       message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_DESTINATION_IP, b'', os.urandom(20)),
+            #                       message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_SOURCE_IP, b'', os.urandom(20)) ]
             response_payloads = [ message.PayloadSA([chosen_proposal]),
                                   message.PayloadNONCE(self.my_nonce),
                                   message.PayloadKE(payload_ke.dh_group, public_key),
-                                  message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_DESTINATION_IP, b'', os.urandom(20)),
-                                  message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_SOURCE_IP, b'', os.urandom(20)) ]
+                                  message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_DESTINATION_IP, b'', sha1_dest),
+                                  message.PayloadNOTIFY(0, enums.Notify.NAT_DETECTION_SOURCE_IP, b'', sha1_src)]
             reply(self.response(enums.Exchange.IKE_SA_INIT, response_payloads))
             self.state = State.SA_SENT
             # sent dgram
@@ -363,8 +384,9 @@ class IKEv2Session:
             child_sa = self.create_child_key(chosen_child_proposal, self.peer_nonce, self.my_nonce)
             chosen_child_proposal.spi = child_sa.spi_in
             # response_payload_idr = message.PayloadIDr(enums.IDType.ID_FQDN, f'{__title__}-{__version__}'.encode())
-            # tmp
-            response_payload_idr = message.PayloadIDr(enums.IDType.ID_IPV4_ADDR, ipaddress.ip_address('10.0.2.15').packed)
+            # TODO: tmp
+            # response_payload_idr = message.PayloadIDr(enums.IDType.ID_IPV4_ADDR, ipaddress.ip_address('10.0.2.15').packed)
+            response_payload_idr = message.PayloadIDr(enums.IDType.ID_RFC822_ADDR, b'@py')
             auth_data = self.auth_data(self.response_data, self.peer_nonce, response_payload_idr, self.my_crypto.sk_p)
 
             response_payloads = [ message.PayloadSA([chosen_child_proposal]),
@@ -523,9 +545,12 @@ def main():
     args.DIRECT = pproxy.Connection('direct://')
     loop = asyncio.get_event_loop()
     sessions = {}
-    transport1, _ = loop.run_until_complete(loop.create_datagram_endpoint(lambda: IKE_500(args, sessions), ('0.0.0.0', 500)))
-    transport2, _ = loop.run_until_complete(loop.create_datagram_endpoint(lambda: SPE_4500(args, sessions), ('0.0.0.0', 4500)))
-    print('Serving on UDP :500 :4500...')
+    # transport1, _ = loop.run_until_complete(loop.create_datagram_endpoint(lambda: IKE_500(args, sessions), ('0.0.0.0', 500)))
+    # transport2, _ = loop.run_until_complete(loop.create_datagram_endpoint(lambda: SPE_4500(args, sessions), ('0.0.0.0', 4500)))
+    # print('Serving on UDP :500 :4500...')
+    transport1, _ = loop.run_until_complete(loop.create_datagram_endpoint(lambda: IKE_500(args, sessions), ('0.0.0.0', 10502)))
+    transport2, _ = loop.run_until_complete(loop.create_datagram_endpoint(lambda: SPE_4500(args, sessions), ('0.0.0.0', 14502)))
+    print('Serving on UDP :10502 :14502...')
     try:
         loop.run_forever()
     except KeyboardInterrupt:

@@ -214,14 +214,14 @@ def DiffieHellman(group: int, peer: bytes):
         # elliptic curve
         return ec_mul(g[0], l, a, p, g[1]).to_bytes(l*2, 'big'), ec_mul(int.from_bytes(peer, 'big'), l, a, p, g[1]).to_bytes(l*2, 'big')[:l]
     else:
-        # tmp: debugging
-        a = 1
-        # A = g**1 % p = 2
-        # s = B
+        # TODO: tmp: debugging
+        a = 2
+        # A = g**2 % p = 4
         # Payload: Key Exchange (34)
-        #   Key Exchange Data: 2
+        #   Key Exchange Data: 4
+        # s = B*2
 
-        # A = 1
+        # A = 1:
         # swan:
         # public DH value verification failed: y < 2 || y > p - 1
         # applying DH public value failed
